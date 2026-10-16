@@ -1,0 +1,174 @@
+#include <SPI.h>
+#include <max6675.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// --- LCD Settings ---
+LiquidCrystal_I2C lcd(0x27, 16, 2);  // Common addresses: 0x27 or 0x3F
+
+// --- MAX6675 Pin Connections ---
+const int thermoDO = 12;   // SO
+const int thermoCS = 10;   // CS
+const int thermoCLK = 13;  // SCK
+MAX6675 thermocouple(thermoCLK, thermoCS, thermoDO);
+
+// --- Pin Definitions ---
+const int fanPin = 9;       // XY-MOS TRIG/PWM
+const int btnUpPin = 2;     // Target temp UP
+const int btnDownPin = 3;   // Target temp DOWN
+const int btnMutePin = 4;   // Mute alarm button
+const int buzzerPin = 8;    // Active-low buzzer module (LOW = ON)
+
+// --- Temperature Control Settings ---
+double targetTemp = 100.0;               // Starting target (°C)
+double currentTemp = NAN;                // Latest thermocouple reading
+const double tempStep = 5.0;             // Change per button press
+const double minTargetTemp = 0.0;
+const double minIgnitionTemp = 30.0;     // Fan stays off below this
+const double overshootMargin = 5.0;      // Alarm if temp > target + this
+const double maxTempLimit = 600.0;       // Absolute overheat limit (°C)
+const int fanRunSpeed = 200;             // PWM (0-255) while heating
+
+// --- Alarm State ---
+bool alarmSilenced = false;              // True after the user mutes the current alarm
+
+// --- Timing ---
+unsigned long previousMillis = 0;
+const long interval = 1000;              // Read temperature every 1 second
+
+// ---------- Helper functions ----------
+
+void updateFan() {
+  int speed = 0;
+
+  if (isnan(currentTemp) || currentTemp >= maxTempLimit) {
+    speed = 0;                           // Fail-safe: sensor error or overheat
+  } else if (currentTemp < minIgnitionTemp) {
+    speed = 0;                           // Option A: no fan until ignition temp
+  } else if (currentTemp < targetTemp) {
+    speed = fanRunSpeed;                 // Below target: fan on
+  } else {
+    speed = 0;                           // At/above target: fan off
+  }
+
+  analogWrite(fanPin, speed);
+}
+
+bool isAlarmActive() {
+  return !isnan(currentTemp) &&
+         (currentTemp >= maxTempLimit ||
+          currentTemp > targetTemp + overshootMargin);
+}
+
+void updateBuzzer() {
+  if (!isAlarmActive()) {
+    alarmSilenced = false;               // Alarm cleared, so re-arm for next time
+  }
+  bool buzzerOn = isAlarmActive() && !alarmSilenced;
+  digitalWrite(buzzerPin, buzzerOn ? LOW : HIGH);  // LOW = ON
+}
+
+void beep() {
+  digitalWrite(buzzerPin, LOW);          // ON
+  delay(100);
+  updateBuzzer();                        // Restore alarm state (or OFF)
+}
+
+void showTarget() {
+  lcd.setCursor(0, 1);
+  lcd.print("Target: ");
+  lcd.print(targetTemp, 1);
+  lcd.print(" C     ");
+}
+
+void showTemp() {
+  lcd.setCursor(0, 0);
+  if (isnan(currentTemp)) {
+    lcd.print("Temp: Error     ");
+  } else {
+    lcd.print("Temp: ");
+    lcd.print(currentTemp, 1);
+    lcd.print(" C     ");
+  }
+}
+
+// ---------- Setup ----------
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(fanPin, OUTPUT);
+  pinMode(btnUpPin, INPUT_PULLUP);
+  pinMode(btnDownPin, INPUT_PULLUP);
+  pinMode(btnMutePin, INPUT_PULLUP);
+  pinMode(buzzerPin, OUTPUT);
+
+  digitalWrite(buzzerPin, HIGH);         // Buzzer OFF
+  analogWrite(fanPin, 0);                // Fan OFF
+
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Waste Oil Stove");
+  lcd.setCursor(0, 1);
+  lcd.print("System Starting ");
+
+  digitalWrite(buzzerPin, LOW);          // Startup beep
+  delay(150);
+  digitalWrite(buzzerPin, HIGH);
+
+  delay(1500);
+  lcd.clear();
+  showTarget();
+}
+
+// ---------- Main loop ----------
+
+void loop() {
+  // 1. Target UP
+  if (digitalRead(btnUpPin) == LOW) {
+    targetTemp += tempStep;
+    if (targetTemp > maxTempLimit) targetTemp = maxTempLimit;
+    showTarget();
+    updateFan();
+    beep();
+    delay(100);                          // Total ~200ms debounce
+  }
+
+  // 2. Target DOWN
+  if (digitalRead(btnDownPin) == LOW) {
+    targetTemp -= tempStep;
+    if (targetTemp < minTargetTemp) targetTemp = minTargetTemp;
+    showTarget();
+    updateFan();
+    beep();
+    delay(100);
+  }
+
+  // 3. Mute button
+  if (digitalRead(btnMutePin) == LOW) {
+    if (isAlarmActive()) {
+      alarmSilenced = true;
+      updateBuzzer();                    // Silence immediately
+    }
+    delay(200);
+  }
+
+  // 4. Read temperature every 1 second
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    currentTemp = thermocouple.readCelsius();
+
+    Serial.print("Current Temp: ");
+    Serial.print(currentTemp);
+    Serial.print(" C | Target: ");
+    Serial.println(targetTemp);
+
+    showTemp();
+    updateFan();
+    updateBuzzer();
+  }
+}
