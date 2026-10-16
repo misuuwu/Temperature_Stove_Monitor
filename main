@@ -1,0 +1,138 @@
+#include <SPI.h>
+#include <max6675.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// --- LCD Settings ---
+// Set the LCD address to 0x27 for a 16 chars and 2 line display (Common: 0x27 or 0x3F)
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// --- MAX6675 Pin Connections ---
+const int thermoDO = 12;  // SO (Data Out)
+const int thermoCS = 10;  // CS (Chip Select)
+const int thermoCLK = 13; // SCK (Clock)
+MAX6675 thermocouple(thermoCLK, thermoCS, thermoDO);
+
+// --- Fan & Button Pin Definitions ---
+const int fanPin = 9;       // Connected to XY-MOS TRIG/PWM
+const int btnUpPin = 2;     // Button 1 (Increase Speed)
+const int btnDownPin = 3;   // Button 2 (Decrease Speed)
+
+// --- Buzzer Pin Definitions ---
+const int buzzerPin = 8;    // Connected to the I/O pin of the buzzer module (Low-level trigger)
+
+// --- Variables for Fan Speed Control ---
+int fanSpeed = 0;           // Current PWM value (0 - 255)
+const int speedStep = 25;   // Amount to increase/decrease per press
+int lastDisplayedSpeed = -1;// Tracks changes to prevent unnecessary LCD flickering
+
+// --- Timing Variables for Temperature Refresh ---
+unsigned long previousMillis = 0;
+const long interval = 1000; // Refresh temperature every 1 second
+
+// --- Safety Threshold ---
+const double maxTempLimit = 600.0; // Overheat warning threshold in Celsius
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Initialize Pins
+  pinMode(fanPin, OUTPUT);
+  pinMode(btnUpPin, INPUT_PULLUP);
+  pinMode(btnDownPin, INPUT_PULLUP);
+  pinMode(buzzerPin, OUTPUT);
+  
+  // Buzzer default state: HIGH = OFF (Low-level trigger)
+  digitalWrite(buzzerPin, HIGH);
+  analogWrite(fanPin, fanSpeed); // Ensure fan starts OFF
+  
+  // Initialize LCD
+  lcd.init();                      
+  lcd.backlight();
+  
+  // Initial Startup Screen & Startup Beep
+  lcd.setCursor(0, 0);
+  lcd.print("Waste Oil Stove");
+  lcd.setCursor(0, 1);
+  lcd.print("System Starting ");
+  
+  // Quick startup beep
+  digitalWrite(buzzerPin, LOW);  // Turn Buzzer ON
+  delay(150);
+  digitalWrite(buzzerPin, HIGH); // Turn Buzzer OFF
+  
+  delay(1500);
+  lcd.clear();
+}
+
+void loop() {
+  // 1. Read Button UP Continuously (Fully Responsive)
+  if (digitalRead(btnUpPin) == LOW) {
+    fanSpeed = fanSpeed + speedStep;
+    if (fanSpeed > 255) {
+      fanSpeed = 255;
+    }
+    analogWrite(fanPin, fanSpeed);
+    delay(200); // Debounce delay
+  }
+
+  // 2. Read Button DOWN Continuously (Fully Responsive)
+  if (digitalRead(btnDownPin) == LOW) {
+    fanSpeed = fanSpeed - speedStep;
+    if (fanSpeed < 0) {
+      fanSpeed = 0;
+    }
+    analogWrite(fanPin, fanSpeed);
+    delay(200); // Debounce delay
+  }
+
+  // 3. Update Fan Speed on LCD (Row 1) only when the speed changes
+  if (fanSpeed != lastDisplayedSpeed) {
+    lastDisplayedSpeed = fanSpeed;
+    
+    // Map PWM value (0-255) to a percentage (0-100%)
+    int fanPercent = map(fanSpeed, 0, 255, 0, 100);
+
+    lcd.setCursor(0, 1);
+    lcd.print("Fan Speed: ");
+    lcd.print(fanPercent);
+    lcd.print("%   "); // Extra spaces clear out trailing digits
+    
+    Serial.print("Fan Speed Updated: ");
+    Serial.print(fanPercent);
+    Serial.println("%");
+  }
+
+  // 4. Read Temperature and Update LCD (Row 0) every 1 second
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    // Read temperature from sensor
+    double celsius = thermocouple.readCelsius();
+    
+    // Print values to Serial Monitor
+    Serial.print("Current Temp: ");
+    Serial.print(celsius);
+    Serial.println(" C");
+
+    // Update Row 0 Screen
+    lcd.setCursor(0, 0);
+    if (isnan(celsius)) {
+      lcd.print("Temp: Error     ");
+      digitalWrite(buzzerPin, HIGH); // Ensure buzzer is off on error
+    } else {
+      lcd.print("Temp: ");
+      lcd.print(celsius);
+      lcd.print(" C     "); // Spaces clean out leftover characters
+
+      // Safety Overheat Alarm Check
+      if (celsius >= maxTempLimit) {
+        digitalWrite(buzzerPin, LOW); // Turn Buzzer ON (Warning!)
+        Serial.println("WARNING: Overheat Temperature Reached!");
+      } else {
+        digitalWrite(buzzerPin, HIGH); // Turn Buzzer OFF
+      }
+    }
+  }
+}
