@@ -1,0 +1,155 @@
+#include <SPI.h>
+#include <max6675.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// --- LCD Settings ---
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// --- MAX6675 Pin Connections ---
+const int thermoDO = 12;  // SO (Data Out)
+const int thermoCS = 10;  // CS (Chip Select)
+const int thermoCLK = 13; // SCK (Clock)
+MAX6675 thermocouple(thermoCLK, thermoCS, thermoDO);
+
+// --- Fan, Button & Buzzer Pin Definitions ---
+const int fanPin = 9;       // Connected to XY-MOS TRIG/PWM
+const int btnUpPin = 2;     // Button 1 (Increase Target Temp)
+const int btnDownPin = 3;   // Button 2 (Decrease Target Temp)
+const int btnMutePin = 5;   // Button 3 (Mute Alarm)
+const int buzzerPin = 4;    // 3-Pin Buzzer Module I/O on Pin 4
+
+// --- Control Variables ---
+double targetTemp = 100.0;     // Default target temperature (°C)
+const double tempStep = 5.0;   // Amount to change target per button press
+int fanSpeed = 0;              // Current PWM value (0 - 255)
+bool buzzerMuted = false;      
+
+// --- Timing Variables ---
+unsigned long previousMillis = 0;
+const long interval = 1000;    // Refresh loop every 1 second
+
+// --- Safety / Warning Threshold ---
+const double maxTempLimit = 25.0; // Warning threshold (Set to 25.0 temporarily for testing)
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Force buzzer high immediately to prevent booting noise
+  pinMode(buzzerPin, OUTPUT);
+  digitalWrite(buzzerPin, HIGH); 
+  
+  pinMode(fanPin, OUTPUT);
+  pinMode(btnUpPin, INPUT_PULLUP);
+  pinMode(btnDownPin, INPUT_PULLUP);
+  pinMode(btnMutePin, INPUT_PULLUP);
+  
+  analogWrite(fanPin, fanSpeed); 
+  
+  lcd.init();                      
+  lcd.backlight();
+  
+  lcd.setCursor(0, 0);
+  lcd.print("Stove Control   ");
+  lcd.setCursor(0, 1);
+  lcd.print("System Ready    ");
+  
+  // Startup beep
+  digitalWrite(buzzerPin, LOW);  
+  delay(150);
+  digitalWrite(buzzerPin, HIGH); 
+  
+  delay(1500);
+  lcd.clear();
+}
+
+void loop() {
+  // 1. Read Button UP (Increases Target Temperature)
+  if (digitalRead(btnUpPin) == LOW) {
+    targetTemp += tempStep;
+    if (targetTemp > 500.0) targetTemp = 500.0; 
+    updateDisplayLabels();
+    delay(200);
+  }
+
+  // 2. Read Button DOWN (Decreases Target Temperature)
+  if (digitalRead(btnDownPin) == LOW) {
+    targetTemp -= tempStep;
+    if (targetTemp < 30.0) targetTemp = 30.0;   
+    updateDisplayLabels();
+    delay(200);
+  }
+
+  // 3. Read Mute Button (Silences the buzzer immediately without stopping the fan)
+  if (digitalRead(btnMutePin) == LOW) {
+    buzzerMuted = true;
+    digitalWrite(buzzerPin, HIGH); // Turn buzzer OFF
+    Serial.println("Alarm Muted by User.");
+    delay(200);
+  }
+
+  // 4. Main Control Loop (Runs every 1 second)
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    double currentTemp = thermocouple.readCelsius();
+    
+    // Update Row 0: Current Temp vs Target Temp
+    lcd.setCursor(0, 0);
+    if (isnan(currentTemp)) {
+      lcd.print("Temp: Error     ");
+      analogWrite(fanPin, 0); 
+    } else {
+      lcd.print("C:");
+      lcd.print((int)currentTemp);
+      lcd.print("C T:");
+      lcd.print((int)targetTemp);
+      lcd.print("C   ");
+
+      // --- AUTOMATED FAN CONTROL LOGIC ---
+      double tempError = targetTemp - currentTemp; 
+
+      // Calculate fan speed based on target temperature normally
+      if (tempError > 10.0) {
+        fanSpeed = 200; 
+      } else if (tempError > 2.0) {
+        fanSpeed = 120;
+      } else if (tempError >= -2.0) {
+        fanSpeed = 60;
+      } else {
+        fanSpeed = 0;
+      }
+      
+      // Apply fan speed (Fan keeps running no matter what temperature it is!)
+      analogWrite(fanPin, fanSpeed);
+
+      // --- ALARM / WARNING CHECK (Does NOT shut down the fan) ---
+      if (currentTemp >= maxTempLimit) {
+        if (!buzzerMuted) {
+          digitalWrite(buzzerPin, LOW); // Turn Buzzer ON (Warning)
+          Serial.println("WARNING: High Temperature Reached!");
+        } else {
+          digitalWrite(buzzerPin, HIGH); // Over threshold, but muted by user
+        }
+      } else {
+        digitalWrite(buzzerPin, HIGH); // Below threshold, turn Buzzer OFF
+        buzzerMuted = false;           // Reset mute state when it cools down safely
+      }
+
+      // Update Row 1 with fan percentage
+      int fanPercent = map(fanSpeed, 0, 255, 0, 100);
+      lcd.setCursor(0, 1);
+      lcd.print("Auto Fan: ");
+      lcd.print(fanPercent);
+      lcd.print("%    ");
+    }
+  }
+}
+
+void updateDisplayLabels() {
+  lcd.setCursor(0, 1);
+  lcd.print("Target: ");
+  lcd.print((int)targetTemp);
+  lcd.print("C   ");
+}
